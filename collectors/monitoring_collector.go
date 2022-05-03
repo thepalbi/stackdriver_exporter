@@ -392,6 +392,8 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 		constMetrics:      make(map[string][]ConstMetric),
 		histogramMetrics:  make(map[string][]HistogramMetric),
 	}
+	// pablo: This is assuming all timeseries objects belong to the same timeseries.Metrics. Maybe it works because of how the
+	// filtering is made, but I'm not that sure.
 	for _, timeSeries := range page.TimeSeries {
 		// pablo: This looks for the point with the maximum observed endTime. Saved into `newestTSPoint`
 		newestEndTime := time.Unix(0, 0)
@@ -456,6 +458,8 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 		default:
 			continue
 		}
+
+		// pablo: Map the value (which can be multiple things) to prometheus float64
 
 		switch timeSeries.ValueType {
 		case "BOOL":
