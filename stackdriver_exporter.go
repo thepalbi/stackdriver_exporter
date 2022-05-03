@@ -146,6 +146,7 @@ func newHandler(projectIDs []string, m *monitoring.Service, logger log.Logger) *
 func (h *handler) innerHandler(filters map[string]bool) http.Handler {
 	registry := prometheus.NewRegistry()
 
+	// pablo: For each project, this object that registers and emits the metrics is created
 	for _, project := range h.projectIDs {
 		monitoringCollector, err := collectors.NewMonitoringCollector(project, h.m, filters, h.logger)
 		if err != nil {

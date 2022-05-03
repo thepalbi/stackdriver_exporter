@@ -47,6 +47,8 @@ func GetExtraFilterModifiers(extraFilter string, separator string) (string, stri
 	return mPrefix[0], strings.Join(mPrefix[1:], "")
 }
 
+// ProjectResource formats the numeric project id like required by GCP Monitoring API.
+// See https://cloud.google.com/monitoring/api/v3#project_name for details.
 func ProjectResource(projectID string) string {
 	return "projects/" + projectID
 }

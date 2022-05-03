@@ -32,6 +32,7 @@ import (
 )
 
 var (
+	// pablo: Puaj! Not all CLI flags are in the same place. They are floating in mid air here!
 	monitoringMetricsTypePrefixes = kingpin.Flag(
 		"monitoring.metrics-type-prefixes", "Comma separated Google Stackdriver Monitoring Metric Type prefixes.",
 	).Required().String()
@@ -211,6 +212,7 @@ func (c *MonitoringCollector) Collect(ch chan<- prometheus.Metric) {
 		c.scrapeErrorsTotalMetric.Inc()
 		level.Error(c.logger).Log("msg", "Error while getting Google Stackdriver Monitoring metrics", "err", err)
 	}
+	// pablo: The metrics below are stack_driver_exporter specific metrics
 	c.scrapeErrorsTotalMetric.Collect(ch)
 
 	c.apiCallsTotalMetric.Collect(ch)
@@ -229,14 +231,56 @@ func (c *MonitoringCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metric) error {
-	metricDescriptorsFunction := func(page *monitoring.ListMetricDescriptorsResponse) error {
+	var wg = &sync.WaitGroup{}
+
+	errChannel := make(chan error, len(c.metricsTypePrefixes))
+
+	// pablo: It seems that a list of prefixes (which identify a metric.type) is required for this to fetch metrics.
+	// Figure out what metric.type refers to (metrics or monitored resource)?
+	for _, metricsTypePrefix := range c.metricsTypePrefixes {
+		wg.Add(1)
+		go func(metricsTypePrefix string) {
+			defer wg.Done()
+			level.Debug(c.logger).Log("msg", "listing Google Stackdriver Monitoring metric descriptors starting with", "prefix", metricsTypePrefix)
+			ctx := context.Background()
+			filter := fmt.Sprintf("metric.type = starts_with(\"%s\")", metricsTypePrefix)
+			// pablo: What does this do `monitoringDropDelegatedProjects`? I've seen if above, and it applies the same filter here
+			if c.monitoringDropDelegatedProjects {
+				// pablo: Oh it replaces the filter, and adds an AND condition. Maybe it's some kind of shared project thing.
+				// Like I just want projects with this project id
+				filter = fmt.Sprintf(
+					"project = \"%s\" AND metric.type = starts_with(\"%s\")",
+					c.projectID,
+					metricsTypePrefix)
+			}
+			// pablo: This is calling into Google code. As I supposed, auth is injected like with AWS clients
+			if err := c.monitoringService.Projects.MetricDescriptors.List(utils.ProjectResource(c.projectID)).
+				Filter(filter).
+				// pablo: Google client apis let you inject a function that has what to do with each paginated response.
+				// the method below is blocking, it executes metricDescriptorsFunction for each returned page.
+				Pages(ctx, c.makeMetricsDescriptorsHandler(ch)); err != nil {
+				errChannel <- err
+			}
+		}(metricsTypePrefix)
+	}
+
+	wg.Wait()
+	close(errChannel)
+
+	return <-errChannel
+}
+
+// makeMetricsDescriptorsHandler creates a handler for monitoring.ProjectsMetricDescriptorsListCall paginated responses.
+// Each page of the response will contain many metric descriptors, and for each of those time series will be retrieved.
+func (c *MonitoringCollector) makeMetricsDescriptorsHandler(ch chan<- prometheus.Metric) func(page *monitoring.ListMetricDescriptorsResponse) error {
+	return func(page *monitoring.ListMetricDescriptorsResponse) error {
 		var wg = &sync.WaitGroup{}
 
 		c.apiCallsTotalMetric.Inc()
 
 		// It has been noticed that the same metric descriptor can be obtained from different GCP
 		// projects. When that happens, metrics are fetched twice and it provokes the error:
-		//     "collected metric xxx was collected before with the same name and label values"
+		//     "collected metric makeMetricsDescriptorsHandler was collected before with the same name and label values"
 		//
 		// Metric descriptor project is irrelevant when it comes to fetch metrics, as they will be
 		// fetched from all the delegated projects filtering by metric type. Considering that, we
@@ -258,6 +302,7 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 			go func(metricDescriptor *monitoring.MetricDescriptor, ch chan<- prometheus.Metric) {
 				defer wg.Done()
 				level.Debug(c.logger).Log("msg", "retrieving Google Stackdriver Monitoring metrics for descriptor", "descriptor", metricDescriptor.Type)
+				// pablo: Add a filter to get this specific metrics, described in metricDescriptor
 				filter := fmt.Sprintf("metric.type=\"%s\"", metricDescriptor.Type)
 				if c.monitoringDropDelegatedProjects {
 					filter = fmt.Sprintf(
@@ -281,6 +326,8 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 					startTime = startTime.Add(ingestDelayDuration * -1)
 				}
 
+				// pablo: These are extra filters like a regex condition over a specific label. We won't implement this in
+				// a first pass I guess.
 				for _, ef := range c.metricsFilters {
 					if strings.Contains(metricDescriptor.Type, ef.Prefix) {
 						filter = fmt.Sprintf("%s AND (%s)", filter, ef.Modifier)
@@ -289,19 +336,23 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 
 				level.Debug(c.logger).Log("msg", "retrieving Google Stackdriver Monitoring metrics with filter", "filter", filter)
 
+				// pablo: The call for this List and builder patterned-methods return some kind of iterator. It's used below.
 				timeSeriesListCall := c.monitoringService.Projects.TimeSeries.List(utils.ProjectResource(c.projectID)).
 					Filter(filter).
+					// pablo: TODO: Double check how this interval is built
 					IntervalStartTime(startTime.Format(time.RFC3339Nano)).
 					IntervalEndTime(endTime.Format(time.RFC3339Nano))
 
 				for {
 					c.apiCallsTotalMetric.Inc()
+					// pablo: This performs and actual call
 					page, err := timeSeriesListCall.Do()
 					if err != nil {
 						level.Error(c.logger).Log("msg", "error retrieving Time Series metrics for descriptor", "descriptor", metricDescriptor.Type, "err", err)
 						errChannel <- err
 						break
 					}
+					// pablo: Where is this page == nil means the paging ended thing explained?
 					if page == nil {
 						break
 					}
@@ -323,36 +374,6 @@ func (c *MonitoringCollector) reportMonitoringMetrics(ch chan<- prometheus.Metri
 
 		return <-errChannel
 	}
-
-	var wg = &sync.WaitGroup{}
-
-	errChannel := make(chan error, len(c.metricsTypePrefixes))
-
-	for _, metricsTypePrefix := range c.metricsTypePrefixes {
-		wg.Add(1)
-		go func(metricsTypePrefix string) {
-			defer wg.Done()
-			level.Debug(c.logger).Log("msg", "listing Google Stackdriver Monitoring metric descriptors starting with", "prefix", metricsTypePrefix)
-			ctx := context.Background()
-			filter := fmt.Sprintf("metric.type = starts_with(\"%s\")", metricsTypePrefix)
-			if c.monitoringDropDelegatedProjects {
-				filter = fmt.Sprintf(
-					"project = \"%s\" AND metric.type = starts_with(\"%s\")",
-					c.projectID,
-					metricsTypePrefix)
-			}
-			if err := c.monitoringService.Projects.MetricDescriptors.List(utils.ProjectResource(c.projectID)).
-				Filter(filter).
-				Pages(ctx, metricDescriptorsFunction); err != nil {
-				errChannel <- err
-			}
-		}(metricsTypePrefix)
-	}
-
-	wg.Wait()
-	close(errChannel)
-
-	return <-errChannel
 }
 
 func (c *MonitoringCollector) reportTimeSeriesMetrics(
@@ -372,6 +393,7 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 		histogramMetrics:  make(map[string][]HistogramMetric),
 	}
 	for _, timeSeries := range page.TimeSeries {
+		// pablo: This looks for the point with the maximum observed endTime. Saved into `newestTSPoint`
 		newestEndTime := time.Unix(0, 0)
 		for _, point := range timeSeries.Points {
 			endTime, err := time.Parse(time.RFC3339Nano, point.Interval.EndTime)
@@ -386,9 +408,12 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 		labelKeys := []string{"unit"}
 		labelValues := []string{metricDescriptor.Unit}
 
+		// pablo: The above merges the `metrics` and `monitored resource` labels
+
 		// Add the metric labels
 		// @see https://cloud.google.com/monitoring/api/metrics
 		for key, value := range timeSeries.Metric.Labels {
+			// pablo: This is very expensive. CHANGEME to a map
 			if !c.keyExists(labelKeys, key) {
 				labelKeys = append(labelKeys, key)
 				labelValues = append(labelValues, value)
@@ -398,12 +423,14 @@ func (c *MonitoringCollector) reportTimeSeriesMetrics(
 		// Add the monitored resource labels
 		// @see https://cloud.google.com/monitoring/api/resources
 		for key, value := range timeSeries.Resource.Labels {
+			// pablo: This is very expensive. CHANGEME to a map
 			if !c.keyExists(labelKeys, key) {
 				labelKeys = append(labelKeys, key)
 				labelValues = append(labelValues, value)
 			}
 		}
 
+		// pablo: More on the delegated/attached project thing. Don't get it
 		if c.monitoringDropDelegatedProjects {
 			dropDelegatedProject := false
 
