@@ -10,7 +10,7 @@ require (
 	github.com/onsi/gomega v1.19.0
 	github.com/prometheus/client_golang v1.12.1
 	github.com/prometheus/client_model v0.2.0
-	github.com/prometheus/common v0.34.0
+	github.com/prometheus/common v0.32.1
 	golang.org/x/net v0.0.0-20220420153159-1850ba15e1be
 	golang.org/x/oauth2 v0.0.0-20220411215720-9780585627b5
 	google.golang.org/api v0.75.0
